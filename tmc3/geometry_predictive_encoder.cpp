@@ -305,12 +305,12 @@ PredGeomEncoder::encodePhiMultiplier(int32_t multiplier)
 void
 PredGeomEncoder::encodeQpOffset(int dqp)
 {
-  _aec->encode(dqp == 0, _ctxQpOffsetIsZero);
+  _aec->encode(dqp == 0, _ctxQpOffsetIsZero);//分配一个上下文，编码dqp=0的情况
   if (dqp == 0) {
     return;
   }
-  _aec->encode(dqp > 0, _ctxQpOffsetSign);
-  _aec->encodeExpGolomb(abs(dqp) - 1, 0, _ctxQpOffsetAbsEgl);
+  _aec->encode(dqp > 0, _ctxQpOffsetSign);//分配一个上下文，编码dqp的符号位
+  _aec->encodeExpGolomb(abs(dqp) - 1, 0, _ctxQpOffsetAbsEgl);//哥伦布指数编码dqp不为0的情况
 }
 
 //----------------------------------------------------------------------------
@@ -441,7 +441,7 @@ PredGeomEncoder::encodeTree(
 	  //计算编码残差(r_r,r_ϕ,r_i)所需的bits
       auto bits = estimateBits(mode, residual);
 
-      if (iMode == 0 || bits < best.bits) {//根据编码位数判断，选择编码所需位数最小的预测模式
+      if (iMode == 0 || bits < best.bits) {//根据编码位数判断，选择编码所需位数最小的预测模式(当imode=0时，对best结构体进行初始化，将模式0下的一些参数赋值给best；当为其他模式时，判断其他模式的编码位数是否小于best.bits，如果小于则更新best，反之则不更新)
         best.prediction = pred;
         best.residual = residual;
         best.mode = mode;
@@ -468,14 +468,14 @@ PredGeomEncoder::encodeTree(
       for (int k = 0; k < 3; k++)
         best.residual[k] = int32_t(quantizer.quantize(best.residual[k]));//量化残差(r_x,r_y,r_z)
 
-      encodeResidual2(best.residual);//编码二次残差
+      encodeResidual2(best.residual);//编码二次残差(由于最终得到的坐标是（x,y,z）笛卡尔坐标，那么球坐标到笛卡尔坐标转换所产生的误差需要记录下来，否则仅仅通过预测的球坐标值和预测的残差只能得到转换后的球坐标，球坐标到笛卡尔坐标的无损恢复无法实现)
     }
 
     // write the reconstructed position back to the point cloud
 	// 将重建坐标写回到点云中
     for (int k = 0; k < 3; k++)
       best.residual[k] = int32_t(quantizer.scale(best.residual[k]));//KD树模式下对残差执行量化
-    reconPts[nodeIdx] = best.prediction + best.residual;//计算每个点的重建值
+    reconPts[nodeIdx] = best.prediction + best.residual;//计算每个点的重建值，后续的属性信息是依附于重构的节点位置坐标，不能依附于原始的点云位置坐标，因为解码端只能拿到重建后节点的位置信息（不一定和原始点云位置重合）
 
     for (int k = 0; k < 3; k++)
       reconPts[nodeIdx][k] = std::max(0, reconPts[nodeIdx][k]);//重建值>=0
@@ -646,15 +646,15 @@ generateGeomPredictionTreeAngular(
   int32_t numLasers = gps.geom_angular_num_lidar_lasers();//获取laser数量
 
   // the prediction tree, one node for each point
-  std::vector<GNode> nodes(pointCount);//创建预测树节点，一个点对应一个节点
-  std::vector<int32_t> prevNodes(numLasers, -1);//创建用于预测的节点
+  std::vector<GNode> nodes(pointCount);//创建预测树节点，一个点对应一个抽象节点，nodes储存的是节点信息，比如节点的父节点、子节点、子节点数量
+  std::vector<int32_t> prevNodes(numLasers, -1);//存储作为下一节点父节点的索引
   std::vector<int32_t> firstNodes(numLasers, -1);//创建首节点，即不同laser照射到的第一个点
 
   CartesianToSpherical cartToSpherical(gps);//创建笛卡尔坐标到球坐标转换对象
 
   for (int nodeIdx = 0, nodeIdxN; nodeIdx < pointCount; nodeIdx = nodeIdxN) {//从nodeIdx = 0开始遍历所有点
     auto& node = nodes[nodeIdx];//索引为nodeIdx的节点
-    auto curPoint = begin[nodeIdx];//索引为nodeIdx，与当前节点对应的当前点的坐标
+    auto curPoint = begin[nodeIdx];//索引为nodeIdx，与当前节点对应的当前点真实坐标（笛卡尔坐标）
     node.childrenCount = 0;//初始化当前节点的子节点数为0
 
     // scan for duplicate points
@@ -672,14 +672,14 @@ generateGeomPredictionTreeAngular(
     auto& sphPos = beginSph[nodeIdx] = cartToSpherical(carPos);//坐标变换，根据当前点坐标计算球坐标
     auto thetaIdx = sphPos[2];//获取i分量
 
-    node.parent = prevNodes[thetaIdx];//获取当前节点的父节点
+    node.parent = prevNodes[thetaIdx];//查找prevNodes里索引号为thetaIdx(i)的节点，并把它作为当前节点的父节点
     if (node.parent != -1) {//当前节点的父节点存在时
       auto& pnode = nodes[prevNodes[thetaIdx]];//获取当前节点的父节点
       pnode.children[pnode.childrenCount++] = nodeIdx;//将当前节点的父节点的子节点数+1，并将当前节点存放到其父节点的children内
     } else//当前节点的父节点不存在时
       firstNodes[thetaIdx] = nodeIdx;//将当前节点作为第一个节点，存放当前节点的索引到firstNodes[thetaIdx]中，表示laser照射到的第一个点
 
-    prevNodes[thetaIdx] = nodeIdx;//将当前节点作为预测节点存放到prevNodes中
+    prevNodes[thetaIdx] = nodeIdx;//将当前点作为下一节点的父节点放进preNodes（同一laser）
   }
 
   int32_t n0 = 0;
@@ -771,14 +771,14 @@ encodePredictiveGeometry(
   // root node size.  This allows every position to be coded using PCM.
   for (int k = 0; k < 3; k++)//初始化残差编码位数为根节点三维值+1
     gbh.pgeom_resid_abs_log2_bits[k] =
-      ilog2(uint32_t(gbh.rootNodeSizeLog2[k])) + 1;
+      ilog2(uint32_t(gbh.rootNodeSizeLog2[k])) + 1;//ilog2函数定义：y = Floor(Log(x) ÷ Log(2))，因为floor函数向下取整，所以初始化时应该加1。
 
   // Number of residual bits bits for angular mode.  This is slightly
   // pessimistic in the calculation of r.
   if (gps.geom_angular_mode_enabled_flag) {//角度编码使能
     auto xyzBboxLog2 = gbh.rootNodeSizeLog2;//初始块的三维大小
-    auto rDivLog2 = gps.geom_angular_radius_inv_scale_log2;//预测几何编码中半径编码的反比例因子
-    auto azimuthBits = gps.geom_angular_azimuth_scale_log2;//应用于预测几何编码中的方位角的比例系数
+    auto rDivLog2 = gps.geom_angular_radius_inv_scale_log2;//预测几何编码中半径编码的反比例因子,决定了半径r所保留的精度，用于后面残差分量中求r的最大值
+    auto azimuthBits = gps.geom_angular_azimuth_scale_log2;//应用于预测几何编码中的方位角的比例系数，决定了角度phi所保留的精度
 
     // first work out the maximum number of bits for the residual
 	// 首先计算出残差所需的最大位数
@@ -795,14 +795,14 @@ encodePredictiveGeometry(
 		ceillog2():将divExp2RoundHalfUp(int64_t(r), rDivLog2)向上舍入为2的幂的整数，然后取对数得到幂次
 		divExp2RoundHalfUp():加半位向上取整
 	*/
-    residualBits[0] = ceillog2(divExp2RoundHalfUp(int64_t(r), rDivLog2));
+    residualBits[0] = ceillog2(divExp2RoundHalfUp(int64_t(r), rDivLog2));//residualBits函数用于计算编码最大残差(residual)所需位数，编码判断残差是否溢出的参考
     residualBits[1] = gps.geom_angular_azimuth_scale_log2;
     residualBits[2] = ceillog2(gps.geom_angular_theta_laser.size() - 1);//最大laser数量 - 1
 
     // the number of prefix bits required
 	// 计算编码最大残差所需位数,存到gbh.pgeom_resid_abs_log2_bits中
     for (int k = 0; k < 3; k++)
-      gbh.pgeom_resid_abs_log2_bits[k] = ilog2(uint32_t(residualBits[k])) + 1;
+      gbh.pgeom_resid_abs_log2_bits[k] = ilog2(uint32_t(residualBits[k])) + 1;//对残差取log向下取整再加1，得到大于残差的最小幂次
   }
 
   // determine each geometry tree, and encode.  Size of trees is limited
@@ -811,10 +811,10 @@ encodePredictiveGeometry(
   PredGeomEncoder enc(gps, gbh, ctxtMem, arithmeticEncoder);// 创建编码器
   int maxPtsPerTree = std::min(opt.maxPtsPerTree, int(numPoints));// 树内最大点数限制
 
-  for (int i = 0; i < numPoints;) {//遍历所有输入点
+  for (int i = 0; i < numPoints;) {//遍历所有输入点,对点云进行多棵预测树的分割
     int iEnd = std::min(i + maxPtsPerTree, int(numPoints));//计算预测树最后一个点的索引
-    auto* begin = &cloud[i];//获取输入点云中第一个点
-    auto* beginSph = &sphericalPos[i];//存放第一个点的球坐标
+    auto* begin = &cloud[i];//获取输入点云中第一个点(当前预测树的第一个点的位置)
+    auto* beginSph = &sphericalPos[i];//存放第一个点的球坐标(当前预测树的第一个点的球坐标)
     auto* end = &cloud[0] + iEnd;//输入点云中的最后一个点
 
     // first, put the points in this tree into a sorted order
@@ -840,10 +840,10 @@ encodePredictiveGeometry(
     enc.encode(a, b, nodes.data(), nodes.size(), codedOrder.data() + i);//编码预测树
 
     // put points in output cloud in decoded order
-    for (auto iBegin = i; i < iEnd; i++) {//编码完成后，遍历所有点
+    for (auto iBegin = i; i < iEnd; i++) {//对于同一预测树iBegin是个定值，表示该预测树起始点索引在原始点云的位置，编码完成后，遍历该预测树下所有点
       auto srcIdx = iBegin + codedOrder[i];//根据初始点索引值和编码后的按编码顺序排列的索引值来计算点的源索引
       assert(srcIdx >= 0);
-      outCloud[i] = cloud[srcIdx];//将编码后的点按顺序存到outCloud中用于解码过程
+      outCloud[i] = cloud[srcIdx];//将编码后的点按顺序存到outCloud中用于解码过程，无损条件下等于原始点云，有损条件下不等于原始点云
       //赋予属性值--color和reflectance
 	  if (cloud.hasColors())
         outCloud.setColor(i, cloud.getColor(srcIdx));
